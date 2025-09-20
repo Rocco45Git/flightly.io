@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover" />
+<title>Mobile Flight Simulator (HTML5)</title>
+<style>
+  :root{
+    --bg:#071127; --panel:rgba(6,12,22,0.7); --accent:#37d1a8; --text:#d9f6ef;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);font-family:Inter,system-ui,Arial;color:var(--text);-webkit-tap-highlight-color:transparent;touch-action:none}
+  #wrap{position:fixed;inset:0;display:flex;flex-direction:column;}
+  #view{flex:1;position:relative;overflow:hidden}
+  canvas{width:100%;height:100%;display:block}
+  /* top HUD */
+  #hud{
+    position:absolute;left:8px;top:8px;z-index:40;
+    background:var(--panel);padding:8px;border-radius:10px;backdrop-filter: blur(6px);
+    min-width:160px;
+  }
+  #hud h1{margin:0;font-size:14px}
+  #hud .row{display:flex;gap:8px;align-items:center;margin-top:6px}
+  #hud .stat{font-size:13px;font-weight:700;color:var(--accent)}
+  /* right panel (small) */
+  #rightPanel{position:absolute;right:8px;top:8px;z-index:40;background:var(--panel);padding:8px;border-radius:10px;display:flex;flex-direction:column;gap:8px}
+  button.big{background:linear-gradient(180deg,var(--accent),#16a07e);border:0;color:#002;font-weight:800;padding:10px 12px;border-radius:10px;font-size:15px;box-shadow:0 3px 0 rgba(0,0,0,0.2)}
+  button.ghost{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--text);padding:8px;border-radius:8px}
+  /* bottom controls (touch) */
+  #bottomControls{position:absolute;left:0;right:0;bottom:0;z-index:50;display:flex;justify-content:space-between;gap:8px;padding:12px;pointer-events:none}
+  .touchArea{width:48%;height:200px;background:linear-gradient(180deg,rgba(0,0,0,0.05),rgba(0,0,0,0.12));border-radius:16px;padding:8px;pointer-events:auto;display:flex;flex-direction:column;align-items:center;justify-content:center}
+  .smallText{font-size:12px;color:#bfeadf}
+  /* joystick */
+  .joystickBase{width:140px;height:140px;border-radius:50%;background:rgba(255,255,255,0.03);display:flex;align-items:center;justify-content:center;position:relative;touch-action:none}
+  .joystickKnob{width:56px;height:56px;border-radius:50%;background:rgba(255,255,255,0.08);display:block;transform:translate(0,0);transition:transform 66ms linear;box-shadow:inset 0 -3px 0 rgba(0,0,0,0.25)}
+  /* throttle vertical */
+  .throttleTrack{width:56px;height:160px;border-radius:12px;background:rgba(255,255,255,0.03);display:flex;align-items:flex-end;padding:8px;position:relative}
+  .throttleKnob{width:42px;height:34px;border-radius:8px;background:linear-gradient(180deg,var(--accent),#15a080);margin-bottom:8px;border:2px solid rgba(0,0,0,0.12)}
+  /* cockpit buttons row */
+  #actions{position:absolute;left:50%;transform:translateX(-50%);bottom:220px;z-index:50;display:flex;gap:10px;pointer-events:auto}
+  .actionBtn{min-width:72px;padding:10px;border-radius:10px;border:0;background:rgba(255,255,255,0.06);color:var(--text);font-weight:700}
+  .togOn{background:linear-gradient(180deg,#6df0c9,#20b88f);color:#022}
+  /* message */
+  #msg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:60;background:rgba(0,0,0,0.6);padding:10px 14px;border-radius:12px;display:none}
+  /* tiny footer */
+  #footer{position:absolute;right:8px;bottom:8px;color:#9cc;z-index:40;font-size:11px;background:transparent}
+  /* responsive tweaks */
+  @media (max-width:520px){
+    .joystickBase{width:120px;height:120px}.joystickKnob{width:48px;height:48px}
+    .throttleTrack{height:140px}.throttleKnob{width:36px;height:28px}
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="view">
+    <canvas id="canvas"></canvas>
+
+    <div id="hud">
+      <h1>Mobile Flight — Ready</h1>
+      <div class="row"><div>Speed</div><div class="stat" id="hudSpeed">0 m/s</div></div>
+      <div class="row"><div>Alt</div><div class="stat" id="hudAlt">0 m</div></div>
+      <div class="row"><div>Throttle</div><div class="stat" id="hudTh">0%</div></div>
+    </div>
+
+    <div id="rightPanel">
+      <button id="engineBtn" class="big">Engine ON</button>
+      <button id="gearBtn" class="ghost">Gear DOWN</button>
+      <button id="flapsBtn" class="ghost">Flaps 0</button>
+      <button id="tiltBtn" class="ghost">Tilt Control: OFF</button>
+      <button id="resetBtn" class="ghost">Reset</button>
+    </div>
+
+    <div id="actions">
+      <button id="takeoffAssist" class="actionBtn">Takeoff Assist</button>
+      <button id="landingAssist" class="actionBtn">Landing Assist</button>
+    </div>
+
+    <div id="msg"></div>
+    <div id="footer">HTML5 · Mobile-Optimized</div>
+
+    <div id="bottomControls">
+      <div class="touchArea" id="leftTouch">
+        <div class="smallText">Steer (tilt or left stick)</div>
+        <div class="joystickBase" id="joyBase"><div class="joystickKnob" id="joyKnob"></div></div>
+      </div>
+
+      <div class="touchArea" id="rightTouch">
+        <div class="smallText">Throttle</div>
+        <div class="throttleTrack" id="throttleTrack"><div class="throttleKnob" id="throttleKnob"></div></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script type="module">
+/* Mobile-first Flight Simulator (single HTML file)
+   - Touch joystick for pitch/roll
+   - Vertical throttle slider on right
+   - Big buttons: engine, gear, flaps, tilt (device orientation)
+   - Simplified but playable physics (30% realism target)
+   - Low-poly rendering, simple looping terrain
+   - Designed for mobile performance
+*/
+
+import * as THREE from 'https://unpkg.com/three@0.158.0/build/three.module.js';
+
+const canvas = document.getElementById('canvas');
+const hudSpeed = document.getElementById('hudSpeed'), hudAlt = document.getElementById('hudAlt'), hudTh = document.getElementById('hudTh');
+const engineBtn = document.getElementById('engineBtn'), gearBtn = document.getElementById('gearBtn'), flapsBtn = document.getElementById('flapsBtn');
+const resetBtn = document.getElementById('resetBtn'), tiltBtn = document.getElementById('tiltBtn');
+const takeoffAssist = document.getElementById('takeoffAssist'), landingAssist = document.getElementById('landingAssist');
+const msg = document.getElementById('msg');
+
+// touch controls
+const joyBase = document.getElementById('joyBase'), joyKnob = document.getElementById('joyKnob');
+const throttleTrack = document.getElementById('throttleTrack'), throttleKnob = document.getElementById('throttleKnob');
+
+let renderer, scene, camera, clock;
+let aircraft;
+let worldTiles = [];
+const TILE = 800;
+const GRID = 3;
+
+let last = performance.now();
+
+// aircraft physics state
+const state = {
+  pos: new THREE.Vector3(-300, 2, 0),
+  vel: new THREE.Vector3(10, 0, 0),
+  quat: new THREE.Quaternion(),
+  angVel: new THREE.Vector3(0,0,0),
+  throttle: 0.35,
+  elevators: 0,
+  ailerons: 0,
+  rudder: 0,
+  flaps: 0,
+  gearDown: true,
+  engineOn: true
+};
+
+// simplified aircraft parameters
+const plane = {
+  mass: 1200,
+  wingArea: 15,
+  wingSpan: 9,
+  CL0: 0.2,
+  CLalpha: 5.0,
+  CD0: 0.025,
+  AR: 8,
+  e: 0.78,
+  maxThrust: 3600,
+  inertia: new THREE.Vector3(2200,2800,3200)
+};
+
+// player input (from touch / tilt)
+const input = { pitch:0, roll:0, yaw:0, throttle:0 };
+let useTilt = false;
+let lastTouchId = null;
+let joyCenter = {x:0,y:0}, joyRadius = 56; // px
+
+init();
+animate();
+
+function init(){
+  clock = new THREE.Clock();
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x86c7ff);
+
+  // mobile-adapted renderer
+  renderer = new THREE.WebGLRenderer({canvas, antialias: true, powerPreference: "low-power" });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.4));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.outputEncoding = THREE.sRGBEncoding;
+
+  camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.1, 20000);
+
+  // lights (minimal)
+  const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+  sun.position.set(300, 600, 200);
+  scene.add(sun);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+
+  // low-poly sky dome (simple color suffices)
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(15000, 8, 6), new THREE.MeshBasicMaterial({color:0x86c7ff, side:THREE.BackSide}));
+  scene.add(sky);
+
+  // generate low-res tiles
+  for(let ix=-1; ix<=1; ix++){
+    for(let iz=-1; iz<=1; iz++){
+      worldTiles.push(makeTile(ix*TILE, iz*TILE));
+      scene.add(worldTiles[worldTiles.length-1]);
+    }
+  }
+
+  // runway a simple plane near origin
+  addRunway();
+
+  // create a low-poly aircraft
+  aircraft = makeSimplePlane();
+  scene.add(aircraft);
+  updateAircraftGraphics();
+
+  // attach camera to a point near cockpit
+  const camHolder = new THREE.Object3D();
+  camHolder.position.set(3.6, 1.05, 0);
+  aircraft.add(camHolder);
+  camHolder.add(camera);
+  camera.position.set(-8, 2.2, 0);
+  camera.lookAt(new THREE.Vector3(4,1.4,0));
+
+  // UI hooks
+  engineBtn.onclick = () => { state.engineOn = !state.engineOn; engineBtn.textContent = 'Engine ' + (state.engineOn ? 'ON' : 'OFF'); }
+  gearBtn.onclick = () => { state.gearDown = !state.gearDown; gearBtn.textContent = 'Gear ' + (state.gearDown ? 'DOWN' : 'UP'); showMsg('Gear ' + (state.gearDown ? 'DOWN' : 'UP')); }
+  flapsBtn.onclick = () => { state.flaps = (state.flaps + 1) % 3; flapsBtn.textContent = 'Flaps ' + state.flaps; showMsg('Flaps ' + state.flaps); }
+  resetBtn.onclick = resetAircraft;
+  tiltBtn.onclick = toggleTilt;
+  takeoffAssist.onclick = takeoffAssistFunc;
+  landingAssist.onclick = landingAssistFunc;
+
+  // touch listeners for joystick & throttle
+  setupTouchControls();
+
+  // device orientation for tilt control (if allowed)
+  window.addEventListener('deviceorientation', handleOrientation, true);
+
+  window.addEventListener('resize', onResize);
+  onResize();
+}
+
+function makeTile(x0,z0){
+  const g = new THREE.PlaneGeometry(TILE, TILE, 8, 8);
+  g.rotateX(-Math.PI/2);
+  const pos = g.attributes.position;
+  for(let i=0;i<pos.count;i++){
+    const x = pos.getX(i) + x0;
+    const z = pos.getZ(i) + z0;
+    const h = Math.sin(x*0.0012)*12 + Math.cos(z*0.0015)*8 + (Math.random()-0.5)*3;
+    pos.setY(i, h);
+  }
+  g.computeVertexNormals();
+  const m = new THREE.MeshStandardMaterial({color:0x2e8b57, flatShading:true});
+  const mesh = new THREE.Mesh(g,m);
+  mesh.receiveShadow = false;
+  mesh.position.set(x0,0,z0);
+  return mesh;
+}
+
+let runway;
+function addRunway(){
+  runway = new THREE.Group();
+  const len = 1800, wid = 40;
+  const g = new THREE.PlaneGeometry(len, wid, 1,1);
+  g.rotateX(-Math.PI/2);
+  const m = new THREE.MeshBasicMaterial({color:0x222});
+  const rm = new THREE.Mesh(g,m);
+  rm.position.set(0,0.02,0);
+  runway.add(rm);
+
+  // stripes
+  const stripeG = new THREE.PlaneGeometry(8, wid/6);
+  stripeG.rotateX(-Math.PI/2);
+  for(let i=-1;i<=1;i+=0.5){
+    const s = new THREE.Mesh(stripeG, new THREE.MeshBasicMaterial({color:0xfff}));
+    s.position.set(50*Math.round(i*10),0.03,(i%1==0?0:wid/4));
+    runway.add(s);
+  }
+  scene.add(runway);
+}
+
+// low-poly plane model for mobile
+function makeSimplePlane(){
+  const g = new THREE.Group();
+  const fus = new THREE.Mesh(new THREE.CapsuleGeometry(0.6, 3.6, 4, 8), new THREE.MeshStandardMaterial({color:0xd0d0d0}));
+  fus.rotation.z = Math.PI/2;
+  fus.castShadow = false;
+  g.add(fus);
+  const wing = new THREE.Mesh(new THREE.BoxGeometry(6.5, 0.18, 2.2), new THREE.MeshStandardMaterial({color:0xf0f0f0}));
+  wing.position.set(1.6,0,0);
+  g.add(wing);
+  const tail = new THREE.Mesh(new THREE.BoxGeometry(1.4,0.1,0.7), new THREE.MeshStandardMaterial({color:0xf0f0f0}));
+  tail.position.set(-2.6,0.9,0);
+  tail.rotation.z = 0.08;
+  g.add(tail);
+  // landing gear simple boxes
+  const gearL = new THREE.Mesh(new THREE.BoxGeometry(0.12,0.5,0.12), new THREE.MeshStandardMaterial({color:0x111}));
+  gearL.position.set(-0.9,-0.5,-0.5); g.add(gearL);
+  const gearR = gearL.clone(); gearR.position.z = 0.5; g.add(gearR);
+  const nose = gearL.clone(); nose.position.set(3.0,-0.5,0); g.add(nose);
+  // store references for animation
+  g.userData = {gear:[gearL,gearR,nose], wing, fus};
+  return g;
+}
+
+function updateAircraftGraphics(){
+  aircraft.position.copy(state.pos);
+  aircraft.quaternion.copy(state.quat);
+  // animate gear visually
+  const deployed = state.gearDown ? 1 : 0;
+  aircraft.userData.gear.forEach((k, i) => {
+    k.visible = deployed === 1;
+  });
+}
+
+// ===== physics helpers =====
+function bodyFromWorld(vecWorld, q){ return vecWorld.clone().applyQuaternion(q.clone().conjugate()); }
+function worldFromBody(vecBody, q){ return vecBody.clone().applyQuaternion(q); }
+
+function aerodynamic(stateLocal){
+  // compute body velocity
+  const vBody = bodyFromWorld(stateLocal.vel, stateLocal.quat);
+  const V = Math.max(0.01, vBody.length());
+  // angle of attack approx from vertical (y) vs forward (x)
+  const alpha = Math.atan2(-vBody.y, Math.max(0.001, vBody.x));
+  const flapFactor = 1 + 0.25*stateLocal.flaps;
+  const CL = (plane.CL0 + plane.CLalpha * alpha) * flapFactor;
+  const K = 1/(Math.PI*plane.AR*plane.e);
+  const CD = plane.CD0 + K * CL * CL;
+  const rho = 1.225;
+  const qbar = 0.5*rho*V*V;
+  const Lift = qbar * plane.wingArea * CL;
+  const Drag = qbar * plane.wingArea * CD;
+  // body forces: drag along -x, lift along +y
+  const FdragBody = new THREE.Vector3(-Math.sign(vBody.x)*Drag, 0, 0);
+  const FliftBody = new THREE.Vector3(0, Lift, 0);
+  // thrust
+  const thrust = (stateLocal.engineOn ? stateLocal.throttle * plane.maxThrust : 0);
+  const FthrustBody = new THREE.Vector3(thrust, 0, 0);
+  // gravity
+  const gWorld = new THREE.Vector3(0, -9.81 * plane.mass, 0);
+  const gBody = bodyFromWorld(gWorld, stateLocal.quat).multiplyScalar(1/plane.mass).multiplyScalar(plane.mass);
+  // sum body
+  const FtotBody = new THREE.Vector3().add(FdragBody).add(FliftBody).add(FthrustBody).add(gBody);
+  // extra drag for gear & flaps
+  if(stateLocal.gearDown) FtotBody.x -= 120 * (V / 40);
+  FtotBody.x -= 40 * stateLocal.flaps * (V / 40);
+  // moments approx
+  const Cm_alpha = -0.4;
+  const Cm = Cm_alpha * alpha - 0.25 * stateLocal.elevators;
+  const M_pitch = Cm * qbar * plane.wingArea * plane.chord;
+  const M_roll = stateLocal.ailerons * qbar * plane.wingArea * plane.wingSpan * 0.08;
+  const M_yaw = stateLocal.rudder * qbar * plane.wingArea * plane.wingSpan * 0.04;
+  const moments = new THREE.Vector3(M_roll, M_yaw, M_pitch);
+  return { forceWorld: worldFromBody(FtotBody, stateLocal.quat), momentsBody: moments, V, alpha };
+}
+
+function integrate(stateLocal, dt){
+  // small substeps
+  const steps = Math.max(1, Math.min(6, Math.round(dt / 0.012)));
+  const sdt = dt / steps;
+  for(let i=0;i<steps;i++){
+    const aero = aerodynamic(stateLocal);
+    const acc = aero.forceWorld.clone().multiplyScalar(1/plane.mass);
+    stateLocal.vel.addScaledVector(acc, sdt);
+    stateLocal.pos.addScaledVector(stateLocal.vel, sdt);
+    // angular: simple approx using inertia vector
+    const I = plane.inertia;
+    const w = stateLocal.angVel.clone();
+    const Iw = new THREE.Vector3(w.x*I.x, w.y*I.y, w.z*I.z);
+    const wxIw = new THREE.Vector3().crossVectors(w, Iw);
+    const M = aero.momentsBody;
+    const wdot = new THREE.Vector3((M.x - wxIw.x)/I.x, (M.y - wxIw.y)/I.y, (M.z - wxIw.z)/I.z);
+    stateLocal.angVel.addScaledVector(wdot, sdt);
+    // integrate quaternion q' = q + 0.5 * q * omega
+    const wx = stateLocal.angVel.x, wy = stateLocal.angVel.y, wz = stateLocal.angVel.z;
+    const dq = new THREE.Quaternion(wx*sdt*0.5, wy*sdt*0.5, wz*sdt*0.5, 0);
+    const q = stateLocal.quat.clone();
+    const qNew = new THREE.Quaternion(
+      q.x + ( dq.x * q.w + dq.y * q.z - dq.z * q.y ),
+      q.y + (-dq.x * q.z + dq.y * q.w + dq.z * q.x ),
+      q.z + ( dq.x * q.y - dq.y * q.x + dq.z * q.w ),
+      q.w + (-dq.x * q.x - dq.y * q.y - dq.z * q.z )
+    );
+    qNew.normalize();
+    stateLocal.quat.copy(qNew);
+    // small damping
+    stateLocal.angVel.multiplyScalar(1 - 0.02 * sdt);
+  }
+}
+
+// ====== Input handling: touch joystick & throttle ======
+function setupTouchControls(){
+  // joystick center
+  const rect = joyBase.getBoundingClientRect();
+  joyCenter.x = rect.left + rect.width/2; joyCenter.y = rect.top + rect.height/2;
+  joyRadius = rect.width/2 - 8;
+
+  let knobX = 0, knobY = 0;
+
+  function updateJoyTouch(clientX, clientY){
+    const dx = clientX - joyCenter.x;
+    const dy = clientY - joyCenter.y;
+    const d = Math.sqrt(dx*dx + dy*dy);
+    const max = joyRadius;
+    let nx = dx, ny = dy;
+    if(d > max){ nx = dx*(max/d); ny = dy*(max/d); }
+    knobX = nx; knobY = ny;
+    joyKnob.style.transform = `translate(${nx}px, ${ny}px)`;
+    // map to input: up/down -> pitch; left/right -> roll
+    input.roll = THREE.MathUtils.clamp(nx / max, -1, 1);
+    input.pitch = THREE.MathUtils.clamp(-ny / max, -1, 1);
+  }
+
+  // touch events
+  joyBase.addEventListener('touchstart', (e)=>{
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    lastTouchId = t.identifier;
+    updateJoyTouch(t.clientX, t.clientY);
+  }, {passive:false});
+  joyBase.addEventListener('touchmove', (e)=>{
+    e.preventDefault();
+    for(const t of e.changedTouches){
+      if(t.identifier === lastTouchId) updateJoyTouch(t.clientX, t.clientY);
+    }
+  }, {passive:false});
+  joyBase.addEventListener('touchend', (e)=>{
+    e.preventDefault();
+    for(const t of e.changedTouches){
+      if(t.identifier === lastTouchId){
+        lastTouchId = null; knobX=knobY=0; joyKnob.style.transform = `translate(0px, 0px)`; input.roll=0; input.pitch=0;
+      }
+    }
+  }, {passive:false});
+
+  // throttle: track vertical pos within track
+  const trackRect = throttleTrack.getBoundingClientRect();
+  function updateThrottle(touchY){
+    const r = throttleTrack.getBoundingClientRect();
+    const top = r.top + 8, bottom = r.bottom - 8;
+    const clamped = Math.max(top, Math.min(bottom, touchY));
+    const pct = 1 - (clamped - top) / (bottom - top); // 0..1
+    state.throttle = Math.max(0, Math.min(1, pct));
+    throttleKnob.style.marginBottom = `${8 + (1-pct)*(r.height-40)}px`;
+    hudTh.textContent = Math.round(state.throttle*100) + '%';
+  }
+
+  throttleTrack.addEventListener('touchstart', (e)=>{
+    e.preventDefault();
+    updateThrottle(e.changedTouches[0].clientY);
+  }, {passive:false});
+  throttleTrack.addEventListener('touchmove', (e)=>{
+    e.preventDefault();
+    updateThrottle(e.changedTouches[0].clientY);
+  }, {passive:false});
+  throttleTrack.addEventListener('touchend', (e)=>{
+    e.preventDefault();
+  }, {passive:false});
+
+  // pointer fallback for desktop (mouse)
+  joyBase.addEventListener('pointerdown', (e)=>{
+    joyBase.setPointerCapture(e.pointerId);
+    updateJoyTouch(e.clientX, e.clientY);
+  });
+  joyBase.addEventListener('pointermove', (e)=>{
+    if(e.buttons) updateJoyTouch(e.clientX, e.clientY);
+  });
+  joyBase.addEventListener('pointerup', (e)=>{
+    joyKnob.style.transform = `translate(0px,0px)`; input.roll=0; input.pitch=0;
+  });
+
+  throttleTrack.addEventListener('pointerdown', (e)=>{
+    updateThrottle(e.clientY);
+  });
+  throttleTrack.addEventListener('pointermove', (e)=>{
+    if(e.buttons) updateThrottle(e.clientY);
+  });
+
+  // layout update when screen rotates
+  window.addEventListener('orientationchange', ()=>{
+    setTimeout(()=>{ const r=joyBase.getBoundingClientRect(); joyCenter.x=r.left+r.width/2; joyCenter.y=r.top+r.height/2; joyRadius=r.width/2-8; },300);
+  });
+}
+
+// Device orientation: tilt steering if toggled
+let orientationAvailable = false;
+let lastBeta=0, lastGamma=0;
+function handleOrientation(evt){
+  if(evt.beta === null) return;
+  orientationAvailable = true;
+  if(!useTilt) return;
+  // beta: front-back tilt (-180 to 180), gamma: left-right (-90 to 90)
+  const beta = evt.beta || 0; // pitch
+  const gamma = evt.gamma || 0; // roll
+  // filter & map to -1..1
+  const pitch = THREE.MathUtils.clamp((beta-5)/40, -1, 1); // tune deadzone
+  const roll = THREE.MathUtils.clamp(gamma/30, -1, 1);
+  input.pitch = -pitch; input.roll = roll;
+}
+
+// small helpers
+function showMsg(t,ms=2200){
+  msg.style.display = 'block'; msg.textContent = t;
+  setTimeout(()=>{ msg.style.display = 'none'; }, ms);
+}
+
+function toggleTilt(){
+  if(!orientationAvailable){
+    // request permission on iOS
+    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+      DeviceMotionEvent.requestPermission().then(permissionState => {
+        if (permissionState === 'granted') { showMsg('Tilt allowed — toggle again'); orientationAvailable=true; }
+        else showMsg('Tilt permission denied');
+      }).catch(()=>showMsg('Tilt permission error'));
+      return;
+    } else {
+      showMsg('No orientation available');
+      return;
+    }
+  }
+  useTilt = !useTilt;
+  tiltBtn.textContent = 'Tilt Control: ' + (useTilt ? 'ON' : 'OFF');
+  tiltBtn.classList.toggle('togOn', useTilt);
+  showMsg('Tilt ' + (useTilt ? 'enabled' : 'disabled'));
+}
+
+// ====== physics + main loop ======
+function updateTerrainLoop(){
+  const gx = Math.round(state.pos.x / TILE);
+  const gz = Math.round(state.pos.z / TILE);
+  let idx = 0;
+  for(let ix=-1; ix<=1; ix++){
+    for(let iz=-1; iz<=1; iz++){
+      const tile = worldTiles[idx++];
+      const tx = (gx + ix) * TILE;
+      const tz = (gz + iz) * TILE;
+      tile.position.x += (tx - tile.position.x) * 0.2;
+      tile.position.z += (tz - tile.position.z) * 0.2;
+    }
+  }
+}
+
+function runwayCheck(){
+  const relZ = state.pos.z;
+  const relX = state.pos.x;
+  const lateral = state.pos.z;
+  // simple on-runway test
+  const onRunway = Math.abs(state.pos.z) < 20 && state.pos.x > -600 && state.pos.x < 600 && state.pos.y < 8;
+  const speed = state.vel.length();
+  if(onRunway && state.gearDown && speed < 30 && Math.abs(state.vel.y) < 1){
+    showMsg('LANDED');
+  }
+  if(onRunway && !state.gearDown && speed > 55 && state.pos.y > 4){
+    showMsg('AIRBORNE');
+  }
+}
+
+function step(dt){
+  // map input to control surfaces, simple smoothing
+  const servo = 3.0;
+  state.elevators += (input.pitch - state.elevators) * Math.min(1, servo * dt);
+  state.ailerons += (input.roll - state.ailerons) * Math.min(1, servo * dt);
+  state.rudder += (input.yaw - state.rudder) * Math.min(1, servo * dt);
+  // throttle already in state.throttle (set by slider)
+  // implement physics integrator (similar simplified version as desktop but tuned)
+  integrate(state, dt);
+  updateAircraftGraphics();
+  updateTerrainLoop();
+  runwayCheck();
+  // update HUD
+  hudSpeed.textContent = state.vel.length().toFixed(1) + ' m/s';
+  hudAlt.textContent = Math.max(0, state.pos.y).toFixed(1) + ' m';
+  hudTh.textContent = Math.round(state.throttle*100) + '%';
+}
+
+// animation
+function animate(){
+  requestAnimationFrame(animate);
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  // apply small auto-trim when no input and engine off
+  if(!useTilt && Math.abs(input.pitch) < 0.02 && Math.abs(input.roll) < 0.02){
+    // relax small motions
+    input.pitch *= 0.98; input.roll *= 0.98;
+  }
+  step(dt);
+  renderer.render(scene, camera);
+}
+animate();
+
+// ===== helpers: reset, assists =====
+function resetAircraft(){
+  state.pos.set(-300, 2, 0);
+  state.vel.set(8, 0, 0);
+  state.quat.set(0,0,0,1);
+  state.angVel.set(0,0,0);
+  state.throttle = 0.35;
+  state.gearDown = true;
+  state.flaps = 0;
+  engineBtn.textContent = 'Engine ' + (state.engineOn ? 'ON' : 'OFF');
+  gearBtn.textContent = 'Gear ' + (state.gearDown ? 'DOWN' : 'UP');
+  flapsBtn.textContent = 'Flaps ' + state.flaps;
+  showMsg('Reset');
+}
+
+function takeoffAssistFunc(){
+  // simple assist: set throttle high and set gentle pitch to help get airborne, then retract gear automatically
+  state.throttle = 1.0;
+  showMsg('Takeoff assist: full throttle');
+  setTimeout(()=>{
+    // small pitch up input for a few seconds
+    const t0 = performance.now();
+    const duration = 4200;
+    const aid = setInterval(()=>{
+      const elapsed = performance.now() - t0;
+      input.pitch = -0.45; // nose up
+      if(elapsed > duration){
+        clearInterval(aid);
+        input.pitch = 0;
+        state.gearDown = false; gearBtn.textContent = 'Gear UP';
+        showMsg('Gear raised');
+      }
+    }, 100);
+  }, 200);
+}
+
+function landingAssistFunc(){
+  // approach: throttle low, flaps down, gear down, small nose-up on touchdown
+  state.throttle = 0.25;
+  state.flaps = 2;
+  flapsBtn.textContent = 'Flaps ' + state.flaps;
+  state.gearDown = true; gearBtn.textContent = 'Gear DOWN';
+  showMsg('Landing assist: gear & flaps down');
+}
+
+function onResize(){
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+}
+
+</script>
+</body>
+</html>
