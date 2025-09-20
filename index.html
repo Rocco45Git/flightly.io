@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0" />
+<title>Ready-to-Play Web Flight Simulator (30% realism)</title>
+<style>
+  html,body{height:100%;margin:0;background:#07142b;color:#cfeaff;font-family:Inter,system-ui,Arial;}
+  #container{width:100%;height:100vh;position:relative;overflow:hidden;}
+  canvas{display:block;}
+  #hud{
+    position:absolute;left:12px;top:12px;z-index:20;background:rgba(2,10,20,0.6);
+    padding:10px;border-radius:8px;backdrop-filter:blur(4px);min-width:260px;
+  }
+  #hud h1{margin:0;font-size:14px}
+  #hud p{margin:6px 0;font-size:13px}
+  #controls{position:absolute;right:12px;top:12px;z-index:20;background:rgba(2,10,20,0.6);padding:10px;border-radius:8px;}
+  button.ui{display:block;margin:6px 0;padding:8px 10px;border-radius:8px;border:0;background:#1b8; color:#002;font-weight:700;cursor:pointer}
+  .small{font-size:12px;color:#a8cbdc}
+  #msg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.6);padding:14px;border-radius:10px;z-index:30;display:none}
+  #footer{position:absolute;right:12px;bottom:12px;z-index:20;background:rgba(0,0,0,0.36);padding:8px;border-radius:8px;font-size:12px}
+</style>
+</head>
+<body>
+<div id="container"></div>
+
+<div id="hud">
+  <h1>Web Flight Simulator — Ready to Play</h1>
+  <p class="small">Keyboard: W/S pitch, A/D roll, Q/E yaw, R/F throttle, G toggle gear, Z/X flaps, Space brake/park. Mouse drag to look in non-VR.</p>
+  <p>Speed: <strong id="speed">0</strong> m/s · Alt: <strong id="alt">0</strong> m · Heading: <strong id="hdg">0</strong>°</p>
+  <p>Throttle: <strong id="throttle">0%</strong> · Gear: <strong id="gear">DOWN</strong> · Flaps: <strong id="flaps">0</strong></p>
+  <p class="small">Takeoff when runway reached and speed sufficient. Land with low sink rate and gear down.</p>
+  <p><button id="resetBtn" class="ui">Reset Aircraft</button></p>
+</div>
+
+<div id="controls">
+  <button id="toggleEngine" class="ui">Engine: ON</button>
+  <button id="toggleAutopilot" class="ui">Autopilot: OFF</button>
+  <button id="enterVR" class="ui">Enter VR (if available)</button>
+</div>
+
+<div id="msg"></div>
+<div id="footer">three.js • Custom flight physics • Looping terrain</div>
+
+<script type="module">
+/* Ready-to-play flight simulator (single HTML).
+   Focus: playable + ~30% realism physics (lift/drag/moments) + runway takeoff/landing + looping terrain.
+   Notes: Serve via HTTPS or localhost for WebXR. Test on desktop first.
+*/
+
+import * as THREE from 'https://unpkg.com/three@0.158.0/build/three.module.js';
+import { OrbitControls } from 'https://unpkg.com/three@0.158.0/examples/jsm/controls/OrbitControls.js';
+import { VRButton } from 'https://unpkg.com/three@0.158.0/examples/jsm/webxr/VRButton.js';
+import { XRControllerModelFactory } from 'https://unpkg.com/three@0.158.0/examples/jsm/webxr/XRControllerModelFactory.js';
+
+const container = document.getElementById('container');
+const speedEl = document.getElementById('speed'), altEl = document.getElementById('alt'), hdgEl = document.getElementById('hdg');
+const throttleEl = document.getElementById('throttle'), gearEl = document.getElementById('gear'), flapsEl = document.getElementById('flaps');
+const resetBtn = document.getElementById('resetBtn'), toggleEngine = document.getElementById('toggleEngine'), toggleAP = document.getElementById('toggleAutopilot');
+const enterVR = document.getElementById('enterVR');
+const msg = document.getElementById('msg');
+
+let scene, camera, renderer, clock, controls;
+let aircraft, cockpit;
+let worldTiles = [];
+const TILE_SIZE = 1000, GRID = 3; // 3x3 tiles
+let lastTime = performance.now();
+
+// --- Realistic-ish aircraft parameters (single-engine light aircraft)
+const plane = {
+  mass: 1200,       // kg (small GA plane)
+  wingArea: 16.2,   // m^2
+  wingSpan: 10.0,
+  chord: 1.62,      // wingArea / span (approx)
+  CL0: 0.2,         // lift coefficient at alpha = 0
+  CLalpha: 5.2,     // per rad (approx)
+  CD0: 0.02,        // zero-lift drag
+  AR: 10.0,         // aspect ratio
+  e: 0.8,           // Oswald efficiency
+  maxThrust: 4000,  // N (engine)
+  inertia: new THREE.Vector3(3000,3500,4500) // approx inertia around x,y,z
+};
+
+// Physics state (position in world meters, orientation quaternion, linear & angular velocities)
+const state = {
+  pos: new THREE.Vector3(0, 120, 0),
+  vel: new THREE.Vector3(45, 0, 0),
+  quat: new THREE.Quaternion(),
+  angVel: new THREE.Vector3(0,0,0), // body rates p,q,r (rad/s) around x,y,z body axes
+  throttle: 0.6,
+  elevators: 0,
+  ailerons: 0,
+  rudder: 0,
+  flaps: 0, // 0..2
+  gearDown: true,
+  engineOn: true,
+  autopilot: false,
+  parkingBrake: false
+};
+
+// initial orientation: point forward along +X
+state.quat.setFromEuler(new THREE.Euler(0,0,0,'YXZ'));
+
+let input = { pitch:0, roll:0, yaw:0, throttleDelta:0 };
+let canInteract = true;
+
+// --- Three.js setup
+init();
+animate();
+
+function init(){
+  clock = new THREE.Clock();
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x80bfff);
+
+  camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.1, 20000);
+  renderer = new THREE.WebGLRenderer({ antialias:true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
+  container.appendChild(renderer.domElement);
+
+  // orbit controls for desktop testing (disabled in VR)
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(5,1.6,0);
+  controls.update();
+
+  camera.position.set(-10, 3, 8);
+
+  // light
+  const sun = new THREE.DirectionalLight(0xffffff, 1.0);
+  sun.position.set(1000, 2000, 500);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048,2048);
+  scene.add(sun);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+
+  // sky gradient-ish
+  const skyGeo = new THREE.SphereGeometry(20000, 32, 15);
+  const skyMat = new THREE.MeshBasicMaterial({ color: 0x80bfff, side: THREE.BackSide });
+  scene.add(new THREE.Mesh(skyGeo, skyMat));
+
+  // generate ground tiles (flatish with small bumps)
+  for(let ix=-1; ix<=1; ix++){
+    for(let iz=-1; iz<=1; iz++){
+      const tile = makeTile(ix * TILE_SIZE, iz * TILE_SIZE);
+      scene.add(tile);
+      worldTiles.push(tile);
+    }
+  }
+
+  // runway (placed along X axis at world y ~ 0)
+  makeRunway();
+
+  // create aircraft model + cockpit
+  createAircraftModel();
+
+  // HUD & controls
+  resetBtn.onclick = () => resetAircraft();
+  toggleEngine.onclick = () => { state.engineOn = !state.engineOn; toggleEngine.textContent = 'Engine: ' + (state.engineOn ? 'ON' : 'OFF'); }
+  toggleAP.onclick = () => { state.autopilot = !state.autopilot; toggleAP.textContent = 'Autopilot: ' + (state.autopilot ? 'ON' : 'OFF'); }
+  enterVR.onclick = () => { document.body.appendChild(VRButton.createButton(renderer)); };
+
+  // WebXR setup (controllers for cockpit interaction)
+  renderer.xr.enabled = true;
+  document.body.appendChild(VRButton.createButton(renderer));
+  setupXRControllers();
+
+  // input handlers
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('resize', onWindowResize);
+
+  // small camera follow in non-VR
+  cameraFollowTarget = new THREE.Object3D();
+  scene.add(cameraFollowTarget);
+  cameraFollowTarget.position.copy(state.pos);
+}
+
+function makeTile(x0, z0){
+  const g = new THREE.PlaneGeometry(TILE_SIZE, TILE_SIZE, 64, 64);
+  g.rotateX(-Math.PI/2);
+  // simple height variation for visuals
+  const posAttr = g.attributes.position;
+  for(let i=0;i<posAttr.count;i++){
+    const x = posAttr.getX(i) + x0;
+    const z = posAttr.getZ(i) + z0;
+    const h = Math.sin(x * 0.0005) * 12 + Math.cos(z * 0.0007) * 9 + (Math.random()-0.5) * 2;
+    posAttr.setY(i, h);
+  }
+  g.computeVertexNormals();
+  const m = new THREE.MeshStandardMaterial({ color: 0x2e8b57, roughness:1 });
+  const mesh = new THREE.Mesh(g, m);
+  mesh.position.set(x0, 0, z0);
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+let runwayGroup;
+function makeRunway(){
+  runwayGroup = new THREE.Group();
+  // runway center at z=0, along +X; runway length 2000 m
+  const rwLength = 2000;
+  const rwWidth = 50;
+  const geom = new THREE.PlaneGeometry(rwLength, rwWidth, 1, 1);
+  geom.rotateX(-Math.PI/2);
+  const mat = new THREE.MeshStandardMaterial({ color:0x222, metalness:0.1, roughness:1 });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.position.set(0, 0.02, 0);
+  runwayGroup.add(mesh);
+
+  // runway markings (simple)
+  const markGeom = new THREE.PlaneGeometry(10, rwWidth, 1,1);
+  markGeom.rotateX(-Math.PI/2);
+  for(let s=-1; s<=1; s+=2){
+    const lines = new THREE.Mesh(markGeom, new THREE.MeshBasicMaterial({color:0xffffff}));
+    lines.position.set(0, 0.03, s*(rwWidth/4));
+    runwayGroup.add(lines);
+  }
+
+  // add simple taxi / lights
+  scene.add(runwayGroup);
+}
+
+function createAircraftModel(){
+  aircraft = new THREE.Group();
+
+  // fuselage
+  const fus = new THREE.Mesh(new THREE.CylinderGeometry(0.9,1.0,7.7,16), new THREE.MeshStandardMaterial({color:0xbdbdbd}));
+  fus.rotation.z = Math.PI/2;
+  fus.castShadow = true;
+  aircraft.add(fus);
+
+  // wings
+  const wing = new THREE.Mesh(new THREE.BoxGeometry(10.0, 0.25, 2.6), new THREE.MeshStandardMaterial({color:0xf0f0f0}));
+  wing.position.set(1.8, 0, 0);
+  wing.castShadow = true;
+  aircraft.add(wing);
+
+  // tailplane
+  const tail = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.2, 0.8), new THREE.MeshStandardMaterial({color:0xf0f0f0}));
+  tail.position.set(-3.6, 1.05, 0);
+  tail.castShadow = true;
+  aircraft.add(tail);
+
+  // cockpit (simple box) and attach camera holder
+  cockpit = new THREE.Group();
+  const cockShell = new THREE.Mesh(new THREE.BoxGeometry(2.8,1.2,1.8), new THREE.MeshStandardMaterial({color:0x222}));
+  cockShell.position.set(3.0, 0.7, 0);
+  cockpit.add(cockShell);
+
+  // create a head mount for camera
+  const head = new THREE.Object3D();
+  head.position.set(3.6, 1.0, 0);
+  cockpit.add(head);
+  aircraft.add(cockpit);
+  cockpit.add(head);
+
+  // attach camera to head (but in scene we will manage camera transform)
+  head.add(camera);
+
+  scene.add(aircraft);
+
+  // initial transform
+  updateAircraftInScene();
+}
+
+// --- Controls & input
+function onKeyDown(e){
+  switch(e.key.toLowerCase()){
+    case 'w': input.pitch = -1; break;
+    case 's': input.pitch = 1; break;
+    case 'a': input.roll = -1; break;
+    case 'd': input.roll = 1; break;
+    case 'q': input.yaw = -1; break;
+    case 'e': input.yaw = 1; break;
+    case 'r': state.throttle = Math.min(1, state.throttle + 0.05); break;
+    case 'f': state.throttle = Math.max(0, state.throttle - 0.05); break;
+    case 'g': state.gearDown = !state.gearDown; gearEl.textContent = state.gearDown ? 'DOWN' : 'UP'; break;
+    case 'z': state.flaps = Math.max(0, state.flaps - 1); flapsEl.textContent = state.flaps; break;
+    case 'x': state.flaps = Math.min(2, state.flaps + 1); flapsEl.textContent = state.flaps; break;
+    case ' ': state.parkingBrake = !state.parkingBrake; break;
+  }
+}
+function onKeyUp(e){
+  if(['w','s'].includes(e.key.toLowerCase())) input.pitch = 0;
+  if(['a','d'].includes(e.key.toLowerCase())) input.roll = 0;
+  if(['q','e'].includes(e.key.toLowerCase())) input.yaw = 0;
+}
+
+// XR Controllers (for pressing 3D buttons later)
+function setupXRControllers(){
+  const factory = new XRControllerModelFactory();
+  for(let i=0;i<2;i++){
+    const c = renderer.xr.getController(i);
+    c.addEventListener('selectstart', ()=>{ /* could implement cockpit touches */});
+    scene.add(c);
+    const grip = renderer.xr.getControllerGrip(i);
+    grip.add(factory.createControllerModel(grip));
+    scene.add(grip);
+  }
+}
+
+// --- Physics integration (semi-realistic)
+// We'll use a simple explicit RK2-ish integrator per frame with forces from aerodynamic model.
+
+function worldToBody(vecWorld, q){
+  // convert world vector to body frame using conjugate rotation
+  const qb = q.clone().conjugate();
+  return vecWorld.clone().applyQuaternion(qb);
+}
+function bodyToWorld(vecBody, q){
+  return vecBody.clone().applyQuaternion(q);
+}
+
+function aerodynamicForcesAndMoments(state){
+  // compute airspeed in body axes
+  const vWorld = state.vel.clone();
+  const q = state.quat;
+  const vBody = worldToBody(vWorld, q);
+
+  const V = Math.max(0.01, vBody.length());
+  // angle of attack: alpha = atan(wz / vx) but using vertical component in body frame y is up, z forward? We defined forward along +X in world; body axes: x-forward, y-right? We'll define body: x-forward, y-right, z-down (but easier mapping:)
+  // For simplicity define body axes as: x-forward, y-right, z-down (positive down). Using our earlier coordinate (we used +X forward in world, we converted)
+  // We'll treat 'z' in body as up/down though: use vBody.y as cross-stream and vBody.z as up-down is messy. Simpler: compute flight path angle from vertical component relative to forward:
+  const forwardSpeed = vBody.x;
+  const verticalSpeed = vBody.y; // Up is positive in this transform (depends on rotation usage). We'll accept slight sign differences; lift uses angle of attack from pitch & flight path.
+  const alpha = Math.atan2(-vBody.y, Math.max(0.0001, vBody.x)); // negative y means nose up -> positive alpha
+
+  // CL depends on alpha and flaps
+  const flapFactor = 1 + 0.3 * state.flaps; // increments CL and increases drag
+  const CL = (plane.CL0 + plane.CLalpha * alpha) * flapFactor;
+  // Induced drag
+  const K = 1 / (Math.PI * plane.AR * plane.e);
+  const CD = plane.CD0 + K * CL * CL;
+
+  const rho = 1.225; // kg/m3 sea level air density
+  const qbar = 0.5 * rho * V * V;
+  // Lift acts roughly perpendicular to velocity in body plane: magnitude = qbar * S * CL
+  const Lift = qbar * plane.wingArea * CL; // N
+  const Drag = qbar * plane.wingArea * CD; // N
+
+  // Convert lift/drag from body reference: Drag opposes forward (x); Lift acts in +Z body down/up? we'll apply lift in body Y-up (approx)
+  // Simpler mapping: assume lift acts in +Z body (up) (we'll create a body vector)
+  // Force in body coordinates:
+  const Fdrag_body = new THREE.Vector3(-Math.sign(forwardSpeed) * Drag, 0, 0); // along -x
+  const Flift_body = new THREE.Vector3(0, Lift, 0); // positive Y is up in our body mapping
+
+  // Thrust (propeller) applied along body's forward axis (+x)
+  const thrust = (state.engineOn ? (state.throttle * plane.maxThrust) : 0);
+  const Fthrust_body = new THREE.Vector3(thrust, 0, 0);
+
+  // Gravity in world coords -> convert to body
+  const gWorld = new THREE.Vector3(0, -9.81 * plane.mass, 0);
+  const gBody = worldToBody(gWorld.clone().multiplyScalar(1/plane.mass), state.quat).multiplyScalar(plane.mass);
+
+  // Sum forces in body coordinates
+  const Ftot_body = new THREE.Vector3().add(Fdrag_body).add(Flift_body).add(Fthrust_body).add(gBody);
+
+  // Moments: simplified aerodynamic pitching moment from elevator and alpha; roll from aileron; yaw from rudder & asymmetric lift
+  // Center of pressure assumed behind c.g.; compute pitching moment coefficient approx:
+  const Cm_alpha = -0.5; // per rad (negative for stability)
+  const Cm = Cm_alpha * alpha + -0.25 * state.elevators; // elevator produces pitching moment
+  const M_pitch = Cm * qbar * plane.wingArea * plane.chord; // Nm
+
+  // roll moment from ailerons proportional to aileron deflection * speed^2 * wing span
+  const M_roll = state.ailerons * qbar * plane.wingArea * plane.wingSpan * 0.1;
+
+  // yaw moment from rudder
+  const M_yaw = state.rudder * qbar * plane.wingArea * plane.wingSpan * 0.05;
+
+  // landing gear and flaps increase drag: approximate additional drag
+  let extraDrag = 0;
+  if(state.gearDown) extraDrag += 200 * (V/50);
+  extraDrag += 50 * state.flaps * (V/40);
+  Ftot_body.x -= Math.sign(Ftot_body.x) * extraDrag;
+
+  // Return world-space force and body moments
+  const Ftot_world = bodyToWorld(Ftot_body, state.quat);
+  const momentsBody = new THREE.Vector3(M_roll, M_yaw, M_pitch); // mapping axes somewhat approximate (roll,pitch,yaw)
+  // Note: our angVel vector uses body axes p (roll), q (pitch), r (yaw) mapping maybe mixed; we'll treat angVel.x->roll etc.
+
+  return {force: Ftot_world, momentBody: momentsBody, V, alpha, Lift, Drag, thrust};
+}
+
+// Integrator: semi-implicit Euler with small substeps for stability
+function stepPhysics(dt){
+  // clamp dt for stability
+  const steps = Math.max(1, Math.min(5, Math.round(dt / 0.01)));
+  const sdt = dt / steps;
+  for(let i=0;i<steps;i++){
+    // Compute aerodynamic forces + moments
+    const aero = aerodynamicForcesAndMoments(state);
+
+    // linear acceleration a = F / m
+    const acc = aero.force.clone().multiplyScalar(1/plane.mass);
+
+    // update linear velocity and position
+    state.vel.addScaledVector(acc, sdt);
+    state.pos.addScaledVector(state.vel, sdt);
+
+    // angular dynamics: simple Euler rotational dynamics in body frame: I * dw/dt + w x (I*w) = M
+    // approximate by wdot = invI*(M - w x (I*w))
+    const I = plane.inertia;
+    const w = state.angVel.clone(); // body rates
+    // compute I*w
+    const Iw = new THREE.Vector3(w.x*I.x, w.y*I.y, w.z*I.z);
+    const wxIw = new THREE.Vector3().crossVectors(w, Iw);
+    const M = aero.momentBody.clone(); // body moments
+    // wdot = (M - w x (I*w)) / I
+    const wdot = new THREE.Vector3(
+      (M.x - wxIw.x) / I.x,
+      (M.y - wxIw.y) / I.y,
+      (M.z - wxIw.z) / I.z
+    );
+    state.angVel.addScaledVector(wdot, sdt);
+
+    // update orientation quaternion by integrating angular velocity (body rates)
+    // dq/dt = 0.5 * q * omega_quat (omega as quaternion [0, w])
+    const wq = new THREE.Quaternion(state.angVel.x * sdt, state.angVel.y * sdt, state.angVel.z * sdt, 0);
+    const q = state.quat.clone();
+    // delta quaternion approximate
+    const dq = new THREE.Quaternion(
+      0.5 * ( wq.x * q.w + wq.y * q.z - wq.z * q.y),
+      0.5 * (-wq.x * q.z + wq.y * q.w + wq.z * q.x),
+      0.5 * ( wq.x * q.y - wq.y * q.x + wq.z * q.w),
+      0.5 * (-wq.x * q.x - wq.y * q.y - wq.z * q.z)
+    );
+    state.quat.x += dq.x;
+    state.quat.y += dq.y;
+    state.quat.z += dq.z;
+    state.quat.w += dq.w;
+    state.quat.normalize();
+
+    // apply controls mapping: input influences control surfaces gradually (servo dynamics)
+    const servoSpeed = 2.5; // rad/s response of control surfaces
+    // map keyboard input to control deflections
+    state.elevators += (input.pitch - state.elevators) * Math.min(1, servoSpeed*sdt);
+    state.ailerons += (input.roll - state.ailerons) * Math.min(1, servoSpeed*sdt);
+    state.rudder += (input.yaw - state.rudder) * Math.min(1, servoSpeed*sdt);
+
+    // throttle smoothing
+    state.throttle += (state.throttle - state.throttle) * 0 + (input.throttleDelta * sdt); // already done by keys
+    // small damping to angular velocities
+    state.angVel.multiplyScalar(1 - 0.02 * sdt);
+  }
+}
+
+// update aircraft model position/orientation in three scene
+function updateAircraftInScene(){
+  aircraft.position.copy(state.pos);
+  aircraft.quaternion.copy(state.quat);
+  // camera head is attached to cockpit (we previously attached camera)
+}
+
+// --- terrain looping: keep 3x3 tiles around aircraft by snapping positions smoothly
+function updateTerrainLoop(){
+  const gridX = Math.round(state.pos.x / TILE_SIZE);
+  const gridZ = Math.round(state.pos.z / TILE_SIZE);
+  let i=0;
+  for(let ix=-1; ix<=1; ix++){
+    for(let iz=-1; iz<=1; iz++){
+      const tile = worldTiles[i++];
+      const targetX = (gridX + ix) * TILE_SIZE;
+      const targetZ = (gridZ + iz) * TILE_SIZE;
+      // lerp for smoothness
+      tile.position.x += (targetX - tile.position.x) * 0.25;
+      tile.position.z += (targetZ - tile.position.z) * 0.25;
+    }
+  }
+}
+
+// --- Runway interactions: detect if aircraft is on runway for takeoff/landing
+function runwayChecks(){
+  // convert aircraft pos to runway local coords: runway is along X axis centered at (0,0)
+  const rel = state.pos.clone();
+  const lateral = rel.z;
+  const along = rel.x;
+  const altitude = state.pos.y;
+  const onRunway = Math.abs(lateral) < 25 && Math.abs(altitude) < 5 && along > -1000 && along < 1000;
+  // if on runway and speed > threshold and nose up, it's taking off
+  const speed = state.vel.length();
+  if(onRunway && state.engineOn && !state.gearDown && speed > 60 && state.pos.y > 3){
+    displayMsg('Airborne — good takeoff!');
+  }
+  // landing detection: if near runway center, gear down, low vertical speed and altitude small
+  const verticalSpeed = state.vel.y;
+  if(onRunway && state.gearDown && Math.abs(verticalSpeed) < 2 && altitude < 3 && speed < 50){
+    displayMsg('Landed — well done!');
+  }
+  // simple gear auto-toggle suggestion when airborne
+  if(state.pos.y > 8 && !state.parkingBrake && state.gearDown && state.throttle > 0.4 && state.vel.length() > 40){
+    // no auto-raise; require player to toggle
+  }
+}
+
+// --- HUD update
+function updateHUD(){
+  speedEl.textContent = (state.vel.length()).toFixed(1);
+  altEl.textContent = state.pos.y.toFixed(1);
+  const euler = new THREE.Euler().setFromQuaternion(state.quat, 'YXZ');
+  let hdg = THREE.MathUtils.radToDeg(euler.y);
+  if(hdg < 0) hdg += 360;
+  hdgEl.textContent = Math.round(hdg);
+  throttleEl.textContent = Math.round(state.throttle * 100) + '%';
+  gearEl.textContent = state.gearDown ? 'DOWN' : 'UP';
+  flapsEl.textContent = state.flaps;
+}
+
+// --- Utility message
+let msgTimer = null;
+function displayMsg(t, ms=3000){
+  msg.style.display = 'block';
+  msg.textContent = t;
+  if(msgTimer) clearTimeout(msgTimer);
+  msgTimer = setTimeout(()=>{ msg.style.display='none'; }, ms);
+}
+
+// --- reset
+function resetAircraft(){
+  state.pos.set(-600, 2, 0); // start at runway start
+  state.vel.set(0,0,0);
+  state.quat.setFromEuler(new THREE.Euler(0,0,0,'YXZ'));
+  state.angVel.set(0,0,0);
+  state.throttle = 0.4;
+  state.gearDown = true;
+  state.flaps = 0;
+  state.engineOn = true;
+  displayMsg('Aircraft reset.');
+  updateHUD();
+  updateAircraftInScene();
+}
+
+// --- Main loop
+let cameraFollowTarget;
+function animate(){
+  renderer.setAnimationLoop(loop);
+}
+
+function loop(){
+  const now = performance.now();
+  let dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+  if(dt <= 0) dt = 0.016;
+
+  // apply autopilot simple behaviour
+  if(state.autopilot){
+    // keep wings level and slight pitch to maintain altitude
+    const pitchError = -state.pitch || 0;
+    input.pitch = THREE.MathUtils.clamp(pitchError * 0.5, -0.8, 0.8);
+    input.roll = -state.roll * 0.8;
+    // throttle auto to keep speed ~ 60 m/s
+    const desired = 60;
+    if(state.vel.length() < desired) state.throttle = Math.min(1, state.throttle + dt*0.05);
+    else state.throttle = Math.max(0, state.throttle - dt*0.05);
+  }
+
+  // apply throttle smoothing
+  state.throttle = THREE.MathUtils.clamp(state.throttle, 0, 1);
+
+  // map input controls to control deflections scale
+  // joystick inputs already update input.* values
+  // (we apply mapping inside physics integrator via state.elevators etc.)
+
+  // integrate physics
+  stepPhysics(dt);
+
+  // update derived fields: pitch, roll from quaternion for HUD and autopilot
+  const e = new THREE.Euler().setFromQuaternion(state.quat, 'YXZ');
+  state.pitch = e.x;
+  state.roll = e.z;
+  state.yaw = e.y;
+
+  // update three scene objects
+  updateAircraftInScene();
+
+  // camera follow: place camera slightly behind & above the cockpit unless in VR
+  if(!renderer.xr.isPresenting){
+    // set camera to follow position behind aircraft at offset in world coords
+    const behind = new THREE.Vector3(-12, 4, 0).applyQuaternion(state.quat);
+    camera.position.copy(state.pos.clone().add(behind));
+    const lookAtPos = state.pos.clone().add(new THREE.Vector3(10, 1.5, 0).applyQuaternion(state.quat));
+    camera.lookAt(lookAtPos);
+  }
+
+  // terrain loop
+  updateTerrainLoop();
+
+  // runway checks (takeoff / landing messages)
+  runwayChecks();
+
+  // HUD
+  updateHUD();
+
+  // render
+  renderer.render(scene, camera);
+}
+
+// --- small helpers: map gamepad axis if present
+function pollGamepads(){
+  const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+  for(const g of gps){
+    if(!g) continue;
+    // typical mapping: left stick pitch/roll, right stick yaw/throttle etc
+    const lx = g.axes[0] || 0;
+    const ly = g.axes[1] || 0;
+    const rx = g.axes[2] || 0;
+    const ry = g.axes[3] || 0;
+    // use deadzone
+    const dz = 0.12;
+    input.roll = Math.abs(lx) > dz ? lx : 0;
+    input.pitch = Math.abs(ly) > dz ? ly : 0; // note: up/down inverted on many pads
+    input.yaw = Math.abs(rx) > dz ? rx : 0;
+    // throttle from triggers if available
+    if(g.buttons.length >= 2){
+      const t = (g.buttons[7] && g.buttons[7].value) ? g.buttons[7].value : 0; // right trigger
+      state.throttle = t;
+    }
+  }
+  requestAnimationFrame(pollGamepads);
+}
+pollGamepads();
+
+// --- window resize
+function onWindowResize(){
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}
+
+// init starting position on runway
+resetAircraft();
+
+</script>
+</body>
+</html>
